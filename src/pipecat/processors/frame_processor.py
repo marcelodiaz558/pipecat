@@ -292,7 +292,8 @@ class FrameProcessor(BaseObject):
             # Cancel the input task. This will stop processing queued frames.
             await self.__cancel_input_task()
         except Exception as e:
-            logger.exception(f"Uncaught exception in {self}: {e}")
+            # Use safer logging that avoids f-string interpolation issues  
+            logger.opt(exception=True).error("Uncaught exception in %s: %s", type(self).__name__, e)
             await self.push_error(ErrorFrame(str(e)))
             raise
 
@@ -335,8 +336,11 @@ class FrameProcessor(BaseObject):
                     await self._observer.on_push_frame(data)
                 await self._prev.queue_frame(frame, direction)
         except Exception as e:
-            logger.exception(f"Uncaught exception in {self}: {e}")
-            await self.push_error(ErrorFrame(str(e)))
+            # Only create ErrorFrame if the current frame is not already an ErrorFrame (prevent infinite recursion)
+            if not isinstance(frame, ErrorFrame):
+                await self.push_error(ErrorFrame(str(e)))
+            # Use safer logging that avoids f-string interpolation issues
+            logger.opt(exception=True).error("Uncaught exception in %s: %s", type(self).__name__, e)
             raise
 
     def _check_started(self, frame: Frame):
