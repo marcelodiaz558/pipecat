@@ -336,12 +336,44 @@ class FrameProcessor(BaseObject):
                     await self._observer.on_push_frame(data)
                 await self._prev.queue_frame(frame, direction)
         except Exception as e:
-            # Only create ErrorFrame if the current frame is not already an ErrorFrame (prevent infinite recursion)
+            # Safely try to get exception details for logging and ErrorFrame
+            try:
+                exc_type_name = type(e).__name__
+                exc_str = str(e)
+            except Exception:  # If even getting type/str fails
+                exc_type_name = "UnknownException"
+                exc_str = "Error stringifying exception"
+
+            # Log the exception.
+            # If the original error is a RecursionError, or if stringifying it mentions recursion,
+            # avoid asking Loguru to format a traceback, as that's the likely source of further recursion.
+            is_recursion_related = isinstance(
+                e, RecursionError) or "maximum recursion depth exceeded" in exc_str
+
+            log_prefix = f"Uncaught exception in {self.name} (processor type: {type(self).__name__}) while processing frame {type(frame).__name__}"
+            try:
+                if is_recursion_related:
+                    logger.error(f"{log_prefix}. Error: {exc_type_name}: {exc_str[:500]}")  # Log limited string
+                else:
+                    # For other errors, try to log with traceback via Loguru's 'exception' parameter.
+                    # This passes the exception object directly to Loguru for formatting.
+                    logger.opt(exception=e).error(log_prefix)
+            except Exception as log_ex:
+                # Fallback if the primary logging attempt fails (e.g., due to deeper recursion)
+                print(f"CRITICAL LOGGING FAILURE in {self.name}: {type(log_ex).__name__}. Original error: {exc_type_name}: {exc_str[:200]}")
+
+            # Attempt to push an ErrorFrame, using the safely stringified exception.
             if not isinstance(frame, ErrorFrame):
-                await self.push_error(ErrorFrame(str(e)))
-            # Use safer logging that avoids f-string interpolation issues
-            logger.opt(exception=True).error("Uncaught exception in %s: %s", type(self).__name__, e)
-            raise
+                try:
+                    # Create error message for the frame, ensure it's reasonably sized.
+                    error_frame_message = f"{exc_type_name}: {exc_str[:100]}"
+                    await self.push_error(ErrorFrame(error_frame_message))
+                except Exception as push_ex:
+                    # If pushing ErrorFrame fails, log it very simply.
+                    # Use logger.error here as a last resort, hoping it doesn't recurse.
+                    logger.error(f"CRITICAL PUSH_ERROR FAILURE in {self.name}: {type(push_ex).__name__}. Original error: {exc_type_name}: {exc_str[:100]}")
+            
+            raise e  # Re-raise the original exception that entered this handler
 
     def _check_started(self, frame: Frame):
         if not self.__started:
